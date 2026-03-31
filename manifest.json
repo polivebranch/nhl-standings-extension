@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "NHL Standings - 3-Point System",
+  "version": "1.0.0",
+  "description": "Modifies NHL.com standings to display a 3-point win system: Regulation Win (W=3pts), OT Win (OTW=2pts), OT Loss (OTL=1pt)",
+  "content_scripts": [
+    {
+      "matches": ["https://www.nhl.com/standings/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
