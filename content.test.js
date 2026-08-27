@@ -88,22 +88,22 @@ function buildTableWithDataCol(rows) {
  */
 function buildTableRealDOM(rows) {
   const colDefs = [
-    { label: 'GP', col: 'gp' },
-    { label: 'W', col: 'w' },
-    { label: 'L', col: 'l' },
-    { label: 'OT', col: 'ot' },
-    { label: 'PTS', col: 'pts' },
-    { label: 'P%', col: 'pptg' },
-    { label: 'RW', col: 'rw' },
-    { label: 'ROW', col: 'row' },
-    { label: 'GF', col: 'gf' },
-    { label: 'GA', col: 'ga' },
-    { label: 'DIFF', col: 'diff' },
-    { label: 'HOME', col: 'home' },
-    { label: 'AWAY', col: 'away' },
-    { label: 'S/O', col: 'so' },
-    { label: 'L10', col: 'l10' },
-    { label: 'STRK', col: 'strk' },
+    { label: 'GP', col: 'gp', key: 'gp' },
+    { label: 'W', col: 'w', key: 'w' },
+    { label: 'L', col: 'l', key: 'l' },
+    { label: 'OT', col: 'ot', key: 'ot' },
+    { label: 'PTS', col: 'pts', key: 'pts' },
+    { label: 'P%', col: 'pptg', key: 'ppct' },
+    { label: 'RW', col: 'rw', key: 'rw' },
+    { label: 'ROW', col: 'row', key: 'row' },
+    { label: 'GF', col: 'gf', key: 'gf' },
+    { label: 'GA', col: 'ga', key: 'ga' },
+    { label: 'DIFF', col: 'diff', key: 'diff' },
+    { label: 'HOME', col: 'home', key: 'home' },
+    { label: 'AWAY', col: 'away', key: 'away' },
+    { label: 'S/O', col: 'so', key: 'so' },
+    { label: 'L10', col: 'l10', key: 'l10' },
+    { label: 'STRK', col: 'strk', key: 'strk' },
   ];
 
   // Team name column (no data-col) + sortable button/span headers for stats
@@ -115,9 +115,8 @@ function buildTableRealDOM(rows) {
   const rowsHtml = rows
     .map((r) => {
       const teamTd = `<td class="nhl-standings__team-col"><span>${r.team || 'Team'}</span></td>`;
-      const cellValues = [r.gp, r.w, r.l, r.ot, r.pts, r.ppct, r.rw, r.row, r.gf, r.ga, r.diff, r.home, r.away, r.so, r.l10, r.strk];
       const statTds = colDefs
-        .map(({ col }, i) => `<td data-col="${col}">${cellValues[i]}</td>`)
+        .map(({ col, key }) => `<td data-col="${col}">${r[key]}</td>`)
         .join('');
       return `<tr>${teamTd}${statTds}</tr>`;
     })
