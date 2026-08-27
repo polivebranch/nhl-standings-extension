@@ -78,6 +78,54 @@ function buildTableWithDataCol(rows) {
   return `<table><thead><tr>${headerHtml}</tr></thead><tbody>${rowsHtml}</tbody></table>`;
 }
 
+/**
+ * Build an HTML string that closely mirrors the real NHL.com standings DOM:
+ * - Each header <th> wraps a sortable <button> containing a <span> with the label
+ * - Each data <td> carries a data-col attribute
+ * - A non-stats "Team" column (no data-col) precedes the numeric columns
+ *
+ * This structure is used for integration tests against the live-DOM shape.
+ */
+function buildTableRealDOM(rows) {
+  const colDefs = [
+    { label: 'GP', col: 'gp' },
+    { label: 'W', col: 'w' },
+    { label: 'L', col: 'l' },
+    { label: 'OT', col: 'ot' },
+    { label: 'PTS', col: 'pts' },
+    { label: 'P%', col: 'pptg' },
+    { label: 'RW', col: 'rw' },
+    { label: 'ROW', col: 'row' },
+    { label: 'GF', col: 'gf' },
+    { label: 'GA', col: 'ga' },
+    { label: 'DIFF', col: 'diff' },
+    { label: 'HOME', col: 'home' },
+    { label: 'AWAY', col: 'away' },
+    { label: 'S/O', col: 'so' },
+    { label: 'L10', col: 'l10' },
+    { label: 'STRK', col: 'strk' },
+  ];
+
+  // Team name column (no data-col) + sortable button/span headers for stats
+  const teamTh = `<th class="nhl-standings__team-col">Team</th>`;
+  const statThs = colDefs
+    .map(({ label, col }) => `<th data-col="${col}"><button type="button"><span>${label}</span></button></th>`)
+    .join('');
+
+  const rowsHtml = rows
+    .map((r) => {
+      const teamTd = `<td class="nhl-standings__team-col"><span>${r.team || 'Team'}</span></td>`;
+      const cellValues = [r.gp, r.w, r.l, r.ot, r.pts, r.ppct, r.rw, r.row, r.gf, r.ga, r.diff, r.home, r.away, r.so, r.l10, r.strk];
+      const statTds = colDefs
+        .map(({ col }, i) => `<td data-col="${col}">${cellValues[i]}</td>`)
+        .join('');
+      return `<tr>${teamTd}${statTds}</tr>`;
+    })
+    .join('');
+
+  return `<table><thead><tr>${teamTh}${statThs}</tr></thead><tbody>${rowsHtml}</tbody></table>`;
+}
+
 /** Insert an HTML string into document.body and return the table element. */
 function insertTable(html) {
   document.body.innerHTML = html;
@@ -89,18 +137,21 @@ function insertTable(html) {
 // -------------------------------------------------------------------------
 
 const TEAM_A = {
+  team: 'Boston Bruins',
   gp: 70, w: 45, l: 18, ot: 7, pts: 97, ppct: '.693', rw: 37, row: 42,
   gf: 220, ga: 175, diff: 45, home: '25-8-3', away: '20-10-4', so: '3-1', l10: '7-2-1', strk: 'W3',
 };
 
 // Team with zero OT wins (all wins are regulation)
 const TEAM_B = {
+  team: 'Toronto Maple Leafs',
   gp: 60, w: 30, l: 25, ot: 5, pts: 65, ppct: '.542', rw: 30, row: 30,
   gf: 180, ga: 190, diff: -10, home: '18-12-2', away: '12-13-3', so: '0-0', l10: '5-5-0', strk: 'L1',
 };
 
 // Team with no games played yet
 const TEAM_C = {
+  team: 'Expansion Team',
   gp: 0, w: 0, l: 0, ot: 0, pts: 0, ppct: '.000', rw: 0, row: 0,
   gf: 0, ga: 0, diff: 0, home: '0-0-0', away: '0-0-0', so: '0-0', l10: '0-0-0', strk: '-',
 };
@@ -318,5 +369,123 @@ describe('processAllTables – data-col attribute headers', () => {
     const otw = TEAM_A.w - TEAM_A.rw;
     const expectedPts = TEAM_A.rw * 3 + otw * 2 + TEAM_A.ot;
     expect(ptsCell.textContent.trim()).toBe(String(expectedPts));
+  });
+});
+
+// -------------------------------------------------------------------------
+// Real DOM structure tests: <button><span> headers + Team column
+// Mirrors the actual NHL.com standings table DOM shape as served by the site.
+// -------------------------------------------------------------------------
+
+describe('processAllTables – real NHL.com DOM shape (button/span headers + Team column)', () => {
+  test('inserts OTW header after W inside the button/span structure', () => {
+    insertTable(buildTableRealDOM([TEAM_A]));
+    ext.processAllTables();
+
+    const otwHeader = document.querySelector('thead th[data-col="otw"]');
+    expect(otwHeader).not.toBeNull();
+    // The cloned header must expose the updated label through its button > span
+    expect(otwHeader.textContent.trim()).toBe('OTW');
+  });
+
+  test('OTW header is placed immediately after the W header', () => {
+    insertTable(buildTableRealDOM([TEAM_A]));
+    ext.processAllTables();
+
+    const headers = Array.from(document.querySelectorAll('thead th'));
+    const wIdx = headers.findIndex((th) => th.getAttribute('data-col') === 'w');
+    const otwIdx = headers.findIndex((th) => th.getAttribute('data-col') === 'otw');
+    expect(wIdx).toBeGreaterThanOrEqual(0);
+    expect(otwIdx).toBe(wIdx + 1);
+  });
+
+  test('OT header text is renamed to OTL', () => {
+    insertTable(buildTableRealDOM([TEAM_A]));
+    ext.processAllTables();
+
+    const otHeader = document.querySelector('thead th[data-col="ot"]');
+    expect(otHeader).not.toBeNull();
+    expect(otHeader.textContent.trim()).toBe('OTL');
+  });
+
+  test('RW and ROW headers and cells are removed', () => {
+    insertTable(buildTableRealDOM([TEAM_A]));
+    ext.processAllTables();
+
+    expect(document.querySelector('th[data-col="rw"]')).toBeNull();
+    expect(document.querySelector('th[data-col="row"]')).toBeNull();
+    expect(document.querySelector('td[data-col="rw"]')).toBeNull();
+    expect(document.querySelector('td[data-col="row"]')).toBeNull();
+  });
+
+  test('W cell is updated to regulation wins (RW)', () => {
+    insertTable(buildTableRealDOM([TEAM_A]));
+    ext.processAllTables();
+
+    const wCell = document.querySelector('tbody td[data-col="w"]');
+    expect(wCell.textContent.trim()).toBe(String(TEAM_A.rw));
+  });
+
+  test('OTW cell value equals total wins minus regulation wins', () => {
+    insertTable(buildTableRealDOM([TEAM_A]));
+    ext.processAllTables();
+
+    const otwCell = document.querySelector('tbody td[data-col="otw"]');
+    expect(otwCell).not.toBeNull();
+    expect(otwCell.textContent.trim()).toBe(String(TEAM_A.w - TEAM_A.rw));
+  });
+
+  test('PTS recomputed as RW×3 + OTW×2 + OTL×1', () => {
+    insertTable(buildTableRealDOM([TEAM_A]));
+    ext.processAllTables();
+
+    const otw = TEAM_A.w - TEAM_A.rw;
+    const expectedPts = TEAM_A.rw * 3 + otw * 2 + TEAM_A.ot;
+    const ptsCell = document.querySelector('tbody td[data-col="pts"]');
+    expect(ptsCell.textContent.trim()).toBe(String(expectedPts));
+  });
+
+  test('P% (pptg) recomputed as PTS / (GP × 3)', () => {
+    insertTable(buildTableRealDOM([TEAM_A]));
+    ext.processAllTables();
+
+    const otw = TEAM_A.w - TEAM_A.rw;
+    const newPts = TEAM_A.rw * 3 + otw * 2 + TEAM_A.ot;
+    const expectedPpct = (newPts / (TEAM_A.gp * 3)).toFixed(3).replace(/^0\./, '.');
+    const ppctCell = document.querySelector('tbody td[data-col="pptg"]');
+    expect(ppctCell.textContent.trim()).toBe(expectedPpct);
+  });
+
+  test('non-stats Team column is left untouched', () => {
+    insertTable(buildTableRealDOM([TEAM_A]));
+    ext.processAllTables();
+
+    const teamCell = document.querySelector('tbody td.nhl-standings__team-col');
+    expect(teamCell).not.toBeNull();
+    expect(teamCell.textContent.trim()).toBe(TEAM_A.team);
+  });
+
+  test('multiple rows are each independently transformed', () => {
+    insertTable(buildTableRealDOM([TEAM_A, TEAM_B]));
+    ext.processAllTables();
+
+    const otwCells = document.querySelectorAll('tbody td[data-col="otw"]');
+    expect(otwCells.length).toBe(2);
+
+    // TEAM_A: 45-37 = 8 OTW
+    expect(otwCells[0].textContent.trim()).toBe(String(TEAM_A.w - TEAM_A.rw));
+    // TEAM_B: 30-30 = 0 OTW
+    expect(otwCells[1].textContent.trim()).toBe('0');
+  });
+
+  test('idempotent: processing the same real-DOM table twice leaves headers unchanged', () => {
+    insertTable(buildTableRealDOM([TEAM_A]));
+    ext.processAllTables();
+    ext.processAllTables();
+
+    const otwHeaders = Array.from(document.querySelectorAll('thead th')).filter(
+      (th) => th.getAttribute('data-col') === 'otw'
+    );
+    expect(otwHeaders.length).toBe(1);
   });
 });
