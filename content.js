@@ -155,7 +155,10 @@
     // --- Process data rows first (before altering header structure) ---
     const rows = Array.from(tbody.querySelectorAll('tr'));
     rows.forEach((row) => {
-      const cells = Array.from(row.querySelectorAll('td'));
+      // Use 'th, td' so that row-header cells (<th scope="row">, used by the
+      // real NHL.com table for the team name column) are included and indices
+      // stay in sync with the header column map.
+      const cells = Array.from(row.querySelectorAll('th, td'));
       // Skip rows that don't have enough cells (e.g. section header rows)
       if (cells.length < headers.length - 1) return;
 

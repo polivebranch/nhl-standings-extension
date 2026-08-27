@@ -114,11 +114,12 @@ function buildTableRealDOM(rows) {
 
   const rowsHtml = rows
     .map((r) => {
-      const teamTd = `<td class="nhl-standings__team-col"><span>${r.team || 'Team'}</span></td>`;
+      // Real NHL.com uses <th scope="row"> (not <td>) for the team name cell
+      const teamTh = `<th scope="row" class="sc-shnyN hGfDpn rt-td left-aligned"><span>${r.team || 'Team'}</span></th>`;
       const statTds = colDefs
         .map(({ col, key }) => `<td data-col="${col}">${r[key]}</td>`)
         .join('');
-      return `<tr>${teamTd}${statTds}</tr>`;
+      return `<tr>${teamTh}${statTds}</tr>`;
     })
     .join('');
 
@@ -459,7 +460,8 @@ describe('processAllTables – real NHL.com DOM shape (button/span headers + Tea
     insertTable(buildTableRealDOM([TEAM_A]));
     ext.processAllTables();
 
-    const teamCell = document.querySelector('tbody td.nhl-standings__team-col');
+    // Real NHL.com uses <th scope="row"> for the team name cell in data rows
+    const teamCell = document.querySelector('tbody th[scope="row"]');
     expect(teamCell).not.toBeNull();
     expect(teamCell.textContent.trim()).toBe(TEAM_A.team);
   });
