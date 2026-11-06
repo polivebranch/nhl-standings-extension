@@ -13,6 +13,7 @@
  *   OTL - renamed from OT
  *   PTS - recomputed as W*3 + OTW*2 + OTL*1
  *   P%  - recomputed as PTS / (GP * 3)
+ *   DPTS / DP% - NHL's original 2-point-system points and percentage
  *   RW  - removed (data merged into W)
  *   ROW - removed
  */
@@ -22,6 +23,9 @@
 
   /** data-col value to assign the new OTW column */
   const OTW_COL = 'otw';
+  const tableStates = new WeakMap();
+  const rowValues = new WeakMap();
+  let activeSort = { column: 'PTS', direction: 'descending' };
 
   /**
    * Format a decimal as ".NNN" matching NHL's P% display style.
@@ -51,8 +55,16 @@
       }
     }
     // Fall back to button or span text
-    const inner = th.querySelector('button, span');
-    if (inner) return inner.textContent.trim().toUpperCase();
+    const inner = th.querySelector('.sortable-table-header, button, span');
+    if (inner) {
+      const walker = document.createTreeWalker(inner, NodeFilter.SHOW_TEXT);
+      let node;
+      while ((node = walker.nextNode())) {
+        if (node.textContent.trim() && !node.parentElement.closest('svg, [aria-hidden="true"]')) {
+          return node.textContent.trim().toUpperCase();
+        }
+      }
+    }
     return th.textContent.trim().toUpperCase();
   }
 
@@ -64,14 +76,14 @@
    */
   function setHeaderText(th, text) {
     // If there's a button or span, update the text inside it
-    const inner = th.querySelector('button, span');
+    const inner = th.querySelector('.sortable-table-header, button, span');
     if (inner) {
-      // Find the first text node inside inner and update it
-      for (const node of inner.childNodes) {
-        if (node.nodeType === Node.TEXT_NODE && node.textContent.trim()) {
-          node.textContent = text;
-          return;
-        }
+      const walker = document.createTreeWalker(inner, NodeFilter.SHOW_TEXT);
+      let node;
+      while ((node = walker.nextNode())) {
+        if (!node.textContent.trim() || node.parentElement.closest('svg, [aria-hidden="true"]')) continue;
+        node.textContent = text;
+        return;
       }
       inner.textContent = text;
       return;
@@ -131,14 +143,31 @@
     return table.querySelector(`th[data-col="${OTW_COL}"]`) !== null;
   }
 
+  function snapshotDOM(root) {
+    const nodes = [root, ...root.querySelectorAll('*')].map((element) => ({
+      element,
+      children: Array.from(element.childNodes),
+      attributes: Array.from(element.attributes, (attr) => [attr.name, attr.value]),
+    }));
+    const text = nodes.flatMap(({ children }) => children)
+      .filter((node) => node.nodeType === Node.TEXT_NODE)
+      .map((node) => [node, node.textContent]);
+    return () => {
+      for (const { element, children, attributes } of nodes) {
+        element.replaceChildren(...children);
+        Array.from(element.attributes).forEach((attr) => element.removeAttribute(attr.name));
+        attributes.forEach(([name, value]) => element.setAttribute(name, value));
+      }
+      text.forEach(([node, value]) => { node.textContent = value; });
+    };
+  }
+
   /**
    * Process a single standings table: insert OTW column, rename OTL,
-   * recompute PTS and P%, and remove RW / ROW columns.
+   * show both points systems, remove RW / ROW, and sort within groups.
    * @param {HTMLTableElement} table
    */
   function processTable(table) {
-    if (isProcessed(table)) return;
-
     const thead = table.querySelector('thead');
     const tbody = table.querySelector('tbody');
     if (!thead || !tbody) return;
@@ -146,21 +175,33 @@
     const headerRow = thead.querySelector('tr');
     if (!headerRow) return;
 
-    const headers = Array.from(headerRow.querySelectorAll('th'));
-    const colMap = buildColMap(headerRow);
+    const processed = isProcessed(table);
+    let state = tableStates.get(table);
+    if (processed && !state) return;
+    const headers = processed ? state.headers : Array.from(headerRow.cells);
+    const colMap = processed ? state.colMap : buildColMap(headerRow);
 
-    // Only process tables that look like NHL standings (must have W and RW)
-    if (colMap.w === undefined || colMap.rw === undefined) return;
+    // Require the source statistics needed by both points systems.
+    if (['gp', 'w', 'ot', 'pts', 'ppct', 'rw'].some((key) => colMap[key] === undefined)) return;
+
+    if (!processed) {
+      state = { headers, colMap, restoreHeader: snapshotDOM(headerRow), rows: new Map() };
+      tableStates.set(table, state);
+    }
 
     // --- Process data rows first (before altering header structure) ---
-    const rows = Array.from(tbody.querySelectorAll('tr'));
-    rows.forEach((row) => {
-      // Use 'th, td' so that row-header cells (<th scope="row">, used by the
-      // real NHL.com table for the team name column) are included and indices
-      // stay in sync with the header column map.
-      const cells = Array.from(row.querySelectorAll('th, td'));
-      // Skip rows that don't have enough cells (e.g. section header rows)
-      if (cells.length < headers.length - 1) return;
+    const rows = Array.from(table.tBodies).flatMap((body) => Array.from(body.rows));
+    rows.forEach((row, order) => {
+      if (row.querySelector(`td[data-col="${OTW_COL}"]`)) return;
+      if (!state.rows.has(row)) state.rows.set(row, { restore: snapshotDOM(row), order });
+      // Include NHL's <th scope="row"> team cell when indexing statistics.
+      const cells = Array.from(row.cells);
+      if (cells.length !== headers.length || cells.some((cell) => cell.colSpan > 1)) {
+        if (!processed) cells.forEach((cell) => {
+          if (cell.colSpan >= headers.length) cell.colSpan += colMap.row === undefined ? 2 : 1;
+        });
+        return;
+      }
 
       const gp = parseInt(cells[colMap.gp]?.textContent.trim() || '0', 10) || 0;
       const totalW = parseInt(cells[colMap.w]?.textContent.trim() || '0', 10) || 0;
@@ -170,6 +211,17 @@
       const otw = Math.max(0, totalW - rw);
       const newPts = rw * 3 + otw * 2 + otl;
       const newPpct = gp > 0 ? newPts / (gp * 3) : 0;
+      const dumbPts = totalW * 2 + otl;
+      const dumbPpct = gp > 0 ? dumbPts / (gp * 2) : 0;
+      rowValues.set(row, { 'P%': newPpct, 'DP%': dumbPpct, order });
+
+      const dptsCell = cells[colMap.pts].cloneNode(false);
+      dptsCell.setAttribute('data-col', 'dpts');
+      dptsCell.textContent = dumbPts;
+      const dpctCell = cells[colMap.ppct].cloneNode(false);
+      dpctCell.setAttribute('data-col', 'dpct');
+      dpctCell.textContent = formatPct(dumbPpct);
+      cells[colMap.ppct].after(dptsCell, dpctCell);
 
       // Update W cell to show regulation wins only
       if (cells[colMap.w]) cells[colMap.w].textContent = rw;
@@ -201,6 +253,11 @@
       }
     });
 
+    if (processed) {
+      sortTable(table);
+      return;
+    }
+
     // --- Update header row ---
 
     // Insert OTW header after W header
@@ -212,6 +269,15 @@
       setHeaderText(otwHeader, 'OTW');
       wHeaderEl.insertAdjacentElement('afterend', otwHeader);
     }
+
+    const dptsHeader = headers[colMap.pts].cloneNode(true);
+    dptsHeader.setAttribute('data-col', 'dpts');
+    setHeaderText(dptsHeader, 'DPTS');
+    const dpctHeader = headers[colMap.ppct].cloneNode(true);
+    dpctHeader.setAttribute('data-col', 'dpct');
+    setHeaderText(dpctHeader, 'DP%');
+    headers[colMap.ppct].after(dptsHeader, dpctHeader);
+    setHeaderText(headers[colMap.ppct], 'P%');
 
     // Rename OT → OTL
     if (colMap.ot !== undefined && headers[colMap.ot]) {
@@ -227,11 +293,161 @@
     if (colMap.row !== undefined && headers[colMap.row]) {
       headers[colMap.row].remove();
     }
+    sortTable(table);
   }
+
+  function sortValue(row, index, column) {
+    const exact = rowValues.get(row)?.[column];
+    if (exact !== undefined) return exact;
+    const cell = row.cells[index];
+    const text = cell?.textContent.trim() || '';
+    if (column === 'TEAM') {
+      return cell.querySelector('a[aria-label]')?.getAttribute('aria-label') || text;
+    }
+    if (/^[+-]?(?:\d+(?:\.\d+)?|\.\d+)$/.test(text)) return Number(text);
+    if (column === 'STRK' && /^[WL]\d+$/.test(text)) {
+      return Number(text.slice(1)) * (text[0] === 'W' ? 1 : -1);
+    }
+    return text;
+  }
+
+  function sortTable(table) {
+    const headers = Array.from(table.tHead.rows[0].cells);
+    const index = headers.findIndex((header) => getHeaderText(header) === activeSort.column);
+    if (index < 0) return;
+    const rankIndex = headers.findIndex((header) => getHeaderText(header) === 'RANK');
+    const ptsIndex = headers.findIndex((header) => getHeaderText(header) === 'PTS');
+    const multiplier = activeSort.direction === 'ascending' ? 1 : -1;
+    const compare = (a, b) => {
+      const left = sortValue(a, index, activeSort.column);
+      const right = sortValue(b, index, activeSort.column);
+      const result = typeof left === 'number' && typeof right === 'number'
+        ? left - right
+        : String(left).localeCompare(String(right), undefined, { numeric: true });
+      return result * multiplier || rowValues.get(a).order - rowValues.get(b).order;
+    };
+
+    // Each table/body or section-delimited run is a group in the selected NHL view.
+    for (const body of table.tBodies) {
+      let group = [];
+      const flush = () => {
+        if (rankIndex >= 0) {
+          [...group].sort((a, b) =>
+            Number(b.cells[ptsIndex].textContent) - Number(a.cells[ptsIndex].textContent) ||
+            rowValues.get(a).order - rowValues.get(b).order)
+            .forEach((row, i) => {
+              rowValues.get(row).RANK = i + 1;
+              row.cells[rankIndex].textContent = i + 1;
+            });
+        }
+        const sorted = [...group].sort(compare);
+        if (sorted.some((row, i) => row !== group[i])) {
+          const end = group[group.length - 1].nextSibling;
+          sorted.forEach((row) => body.insertBefore(row, end));
+        }
+        group = [];
+      };
+      for (const row of Array.from(body.rows)) {
+        Array.from(row.cells).forEach((cell, i) => {
+          cell.classList.remove('sorted', 'sorted-0', 'sorted-asc', 'sorted-desc');
+          if (i === index && rowValues.has(row)) {
+            cell.classList.add('sorted', 'sorted-0', multiplier === 1 ? 'sorted-asc' : 'sorted-desc');
+          }
+        });
+        if (row.cells.length === headers.length && rowValues.has(row)) group.push(row);
+        else flush();
+      }
+      flush();
+    }
+
+    headers.forEach((header, i) => {
+      const column = getHeaderText(header);
+      const direction = i === index ? activeSort.direction : 'none';
+      header.setAttribute('aria-sort', direction);
+      header.classList.remove('sorted', 'sorted-0', 'sorted-asc', 'sorted-desc');
+      if (i === index) header.classList.add('sorted', 'sorted-0', multiplier === 1 ? 'sorted-asc' : 'sorted-desc');
+      let button = header.querySelector('button');
+      if (!button) {
+        button = document.createElement('button');
+        button.type = 'button';
+        button.append(...header.childNodes);
+        header.append(button);
+      }
+      button.title = column;
+      button.setAttribute('aria-label', `${column}, ${direction === 'none' ? 'sortable' : `sorted ${direction}`}`);
+      header.querySelectorAll('svg').forEach((icon) => { icon.style.display = 'none'; });
+      let indicator = button.querySelector('[data-nhl-sort-indicator]');
+      if (i === index && !indicator) {
+        indicator = document.createElement('span');
+        indicator.setAttribute('data-nhl-sort-indicator', '');
+        indicator.setAttribute('aria-hidden', 'true');
+        button.append(indicator);
+      }
+      if (indicator) {
+        indicator.style.cssText = i === index
+          ? `display:inline-block;margin-left:4px;border-left:4px solid transparent;border-right:4px solid transparent;border-${multiplier === 1 ? 'bottom' : 'top'}:5px solid currentColor`
+          : 'display:none';
+      }
+    });
+  }
+
+  // Capture before the site's React handlers so NHL's 2-point sort never runs.
+  window.addEventListener('click', (event) => {
+    const header = event.target instanceof Element ? event.target.closest('thead th') : null;
+    const table = header?.closest('table');
+    if (!table || !tableStates.has(table) || !isProcessed(table)) {
+      restoreTables();
+      return;
+    }
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    const column = getHeaderText(header);
+    activeSort = {
+      column,
+      direction: activeSort.column === column && activeSort.direction === 'descending'
+        ? 'ascending'
+        : column === 'TEAM' && activeSort.column !== column ? 'ascending' : 'descending',
+    };
+    processAllTables();
+  }, true);
+
+  function restoreTables() {
+    observer.disconnect();
+    document.querySelectorAll('table').forEach((table) => {
+      const state = tableStates.get(table);
+      if (state && isProcessed(table)) {
+        state.restoreHeader();
+        for (const body of table.tBodies) {
+          const rows = Array.from(body.rows);
+          rows.forEach((row) => state.rows.get(row)?.restore());
+          [...rows].sort((a, b) => (state.rows.get(a)?.order ?? rows.indexOf(a)) -
+            (state.rows.get(b)?.order ?? rows.indexOf(b)))
+            .forEach((row) => body.append(row));
+        }
+      }
+      tableStates.delete(table);
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+    clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(processAllTables, 150);
+  }
+
+  // Give React its original nodes/order back before tabs, dates or filters update.
+  window.addEventListener('change', restoreTables, true);
+  window.addEventListener('keydown', (event) => {
+    if (['Enter', ' ', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.key) &&
+        event.target instanceof Element && !event.target.closest('table')) restoreTables();
+  }, true);
 
   /** Process every table on the page. */
   function processAllTables() {
-    document.querySelectorAll('table').forEach(processTable);
+    // Don't observe our own cell insertions and row moves.
+    observer.disconnect();
+    try {
+      document.querySelectorAll('table').forEach(processTable);
+    } finally {
+      observer.observe(document.body, { childList: true, subtree: true });
+    }
   }
 
   // --- MutationObserver: react to dynamically rendered content ---
@@ -258,14 +474,13 @@
 
   const origPushState = history.pushState.bind(history);
   history.pushState = function (...args) {
+    restoreTables();
     origPushState(...args);
     // New content will be loaded; the observer will pick it up automatically
     // since the new tables won't have our OTW header yet.
   };
 
-  window.addEventListener('popstate', () => {
-    // Same as above — observer handles re-processing of newly rendered tables
-  });
+  window.addEventListener('popstate', restoreTables);
 
   // Expose internals for unit testing
   if (typeof module !== 'undefined' && module.exports) {

@@ -19,9 +19,27 @@ A Chrome extension that modifies the NHL standings table on [NHL.com](https://ww
 | **L** | Unchanged |
 | **PTS** | Recomputed as `W×3 + OTW×2 + OTL×1` |
 | **P%** | Recomputed as `PTS ÷ (GP × 3)` |
+| **DPTS** | **New** — dumb points, using NHL's real-world 2-point system: `2 × (W + OTW) + OTL` |
+| **DP%** | **New** — dumb points percentage: `DPTS ÷ (GP × 2)` |
 | **RW** | Removed (data now shown in the W column) |
 | **ROW** | Removed |
 | GP, GF, GA, DIFF, HOME, AWAY, S/O, L10, STRK | Unchanged |
+
+PTS, P%, DPTS and DP% appear together. Percentages display three decimal places;
+teams with no games played show `.000`.
+
+## Sorting
+
+Standings initially sort by **3-point PTS, descending**. Click a column header to
+sort locally; click it again to toggle ascending/descending. Numeric columns use
+numeric ordering, and percentages use their unrounded values. Equal values retain
+the site's original order. Team names initially sort alphabetically.
+
+Sorting applies to all standings groups in the selected tab without moving teams
+between divisions, conferences, or existing wild-card qualification groups. League
+view sorts the entire league. Rank reflects descending 3-point PTS within each
+group, even when another column is sorted. The selected sort is reapplied after
+tab or date changes.
 
 ## Installation
 

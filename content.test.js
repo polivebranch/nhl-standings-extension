@@ -161,8 +161,15 @@ const TEAM_C = {
 // -------------------------------------------------------------------------
 
 let ext;
+let listeners;
+let observations;
+let originalPushState;
 
 beforeEach(() => {
+  jest.useFakeTimers();
+  listeners = jest.spyOn(window, 'addEventListener');
+  observations = jest.spyOn(MutationObserver.prototype, 'observe');
+  originalPushState = history.pushState;
   // Reset DOM
   document.body.innerHTML = '';
 
@@ -172,14 +179,22 @@ beforeEach(() => {
   ext = require('./content.js');
 });
 
+afterEach(() => {
+  listeners.mock.calls.forEach((args) => window.removeEventListener(...args));
+  observations.mock.contexts.forEach((observer) => observer.disconnect());
+  history.pushState = originalPushState;
+  jest.clearAllTimers();
+  jest.useRealTimers();
+  jest.restoreAllMocks();
+});
+
 // -------------------------------------------------------------------------
 // Unit tests for pure helper functions
 // -------------------------------------------------------------------------
 
 describe('formatPct', () => {
-  const { formatPct } = require('./content.js');
-
   test('formats a decimal as .NNN with no leading zero', () => {
+    const { formatPct } = ext;
     expect(formatPct(0.756)).toBe('.756');
     expect(formatPct(1.0)).toBe('1.000');
     expect(formatPct(0)).toBe('.000');
@@ -187,9 +202,245 @@ describe('formatPct', () => {
   });
 
   test('handles edge cases gracefully', () => {
+    const { formatPct } = ext;
     expect(formatPct(NaN)).toBe('.000');
     expect(formatPct(Infinity)).toBe('.000');
     expect(formatPct(-Infinity)).toBe('.000');
+  });
+
+  describe('two-system columns and local sorting', () => {
+    const highDumb = { ...TEAM_A, team: 'Overtime', gp: 10, w: 8, rw: 1, ot: 0, pts: 16, ppct: '.800' };
+    const highThree = { ...TEAM_B, team: 'Regulation', gp: 10, w: 6, rw: 6, ot: 0, pts: 12, ppct: '.600' };
+
+    function header(table, label) {
+      return Array.from(table.tHead.rows[0].cells).find((cell) => ext.getHeaderText(cell) === label);
+    }
+
+    function teams(table) {
+      return Array.from(table.querySelectorAll('tbody th[scope="row"]'), (cell) => cell.textContent.trim());
+    }
+
+    function click(table, label) {
+      header(table, label).querySelector('button').click();
+    }
+
+    test('shows adjacent 3-point and 2-point columns with accurate values', () => {
+      const table = insertTable(buildTableRealDOM([TEAM_A, TEAM_C]));
+      ext.processAllTables();
+      const labels = Array.from(table.tHead.rows[0].cells, ext.getHeaderText);
+      const start = labels.indexOf('PTS');
+      expect(labels.slice(start, start + 4)).toEqual(['PTS', 'P%', 'DPTS', 'DP%']);
+      const rows = table.tBodies[0].rows;
+      expect(rows[0].querySelector('[data-col="dpts"]').textContent).toBe('97');
+      expect(rows[0].querySelector('[data-col="dpct"]').textContent).toBe('.693');
+      expect(rows[1].querySelector('[data-col="dpts"]').textContent).toBe('0');
+      expect(rows[1].querySelector('[data-col="dpct"]').textContent).toBe('.000');
+      expect(rows[0].cells.length).toBe(table.tHead.rows[0].cells.length);
+    });
+
+    test('starts in 3-point order, toggles PTS, and suppresses native sorting', () => {
+      const table = insertTable(buildTableRealDOM([highDumb, highThree]));
+      const nativeSort = jest.fn();
+      table.addEventListener('click', nativeSort);
+      ext.processAllTables();
+      expect(teams(table)).toEqual(['Regulation', 'Overtime']);
+      expect(header(table, 'PTS').getAttribute('aria-sort')).toBe('descending');
+      click(table, 'PTS');
+      expect(teams(table)).toEqual(['Overtime', 'Regulation']);
+      expect(header(table, 'PTS').getAttribute('aria-sort')).toBe('ascending');
+      click(table, 'PTS');
+      expect(teams(table)).toEqual(['Regulation', 'Overtime']);
+      expect(nativeSort).not.toHaveBeenCalled();
+    });
+
+    test.each(['DPTS', 'DP%', 'P%', 'W', 'OTW', 'L', 'GP', 'GF', 'DIFF'])('%s toggles locally with one active indicator', (column) => {
+      const table = insertTable(buildTableRealDOM([highDumb, highThree]));
+      ext.processAllTables();
+      click(table, column);
+      expect(header(table, column).getAttribute('aria-sort')).toBe('descending');
+      click(table, column);
+      expect(header(table, column).getAttribute('aria-sort')).toBe('ascending');
+      expect(table.querySelectorAll('thead th[aria-sort="ascending"]').length).toBe(1);
+      if (column !== 'PTS') expect(header(table, 'PTS').getAttribute('aria-sort')).toBe('none');
+    });
+
+    test('DPTS and DP% sort by the 2-point system, not the 3-point system', () => {
+      const table = insertTable(buildTableRealDOM([highDumb, highThree]));
+      ext.processAllTables();
+      for (const column of ['DPTS', 'DP%']) {
+        click(table, column);
+        expect(teams(table)).toEqual(['Overtime', 'Regulation']);
+        click(table, column);
+        expect(teams(table)).toEqual(['Regulation', 'Overtime']);
+      }
+    });
+
+    test('sorts percentages with full precision rather than rounded text', () => {
+      const table = insertTable(buildTableRealDOM([
+        { ...TEAM_A, team: 'Lower', gp: 10001, w: 5000, rw: 0, ot: 0 },
+        { ...TEAM_A, team: 'Higher', gp: 10000, w: 5000, rw: 0, ot: 0 },
+      ]));
+      ext.processAllTables();
+      click(table, 'P%');
+      expect(teams(table)).toEqual(['Higher', 'Lower']);
+      expect(Array.from(table.querySelectorAll('[data-col="pptg"]')).slice(1).map((cell) => cell.textContent))
+        .toEqual(['.333', '.333']);
+      click(table, 'DP%');
+      expect(teams(table)).toEqual(['Higher', 'Lower']);
+    });
+
+    test('uses numeric comparison for points rather than lexicographic ordering', () => {
+      const table = insertTable(buildTableRealDOM([
+        { ...TEAM_A, team: 'Nine', gp: 10, w: 3, rw: 3, ot: 0 },
+        { ...TEAM_B, team: 'Twelve', gp: 10, w: 4, rw: 4, ot: 0 },
+      ]));
+      ext.processAllTables();
+      expect(teams(table)).toEqual(['Twelve', 'Nine']);
+      click(table, 'PTS');
+      expect(teams(table)).toEqual(['Nine', 'Twelve']);
+    });
+
+    test.each(['division', 'conference', 'league', 'wildcard'])('preserves %s tables when sorting all group headers', (view) => {
+      const tableCount = { division: 4, conference: 2, league: 1, wildcard: 6 };
+      document.body.innerHTML = Array.from({ length: tableCount[view] }, () =>
+        buildTableRealDOM([highDumb, highThree])).join('');
+      ext.processAllTables();
+      const tables = Array.from(document.querySelectorAll('table'));
+      click(tables[0], 'PTS');
+      tables.forEach((table) => expect(teams(table)).toEqual(['Overtime', 'Regulation']));
+      click(tables[tables.length - 1], 'PTS');
+      tables.forEach((table) => expect(teams(table)).toEqual(['Regulation', 'Overtime']));
+    });
+
+    test('preserves section dividers and multiple tbody boundaries', () => {
+      const table = insertTable(buildTableRealDOM([highDumb, highThree, highDumb, highThree]));
+      const divider = document.createElement('tr');
+      divider.innerHTML = '<th colspan="17">Division</th>';
+      table.tBodies[0].rows[2].before(divider);
+      const secondBody = document.createElement('tbody');
+      secondBody.innerHTML = buildTableRealDOM([highDumb, highThree]).match(/<tbody>(.*)<\/tbody>/)[1];
+      table.append(secondBody);
+      ext.processAllTables();
+      expect(teams(table)).toEqual(['Regulation', 'Overtime', 'Regulation', 'Overtime', 'Regulation', 'Overtime']);
+      expect(table.tBodies[0].rows[2]).toBe(divider);
+      expect(divider.cells[0].colSpan).toBe(table.tHead.rows[0].cells.length);
+      click(table, 'PTS');
+      expect(teams(table)).toEqual(['Overtime', 'Regulation', 'Overtime', 'Regulation', 'Overtime', 'Regulation']);
+      expect(table.tBodies[0].rows[2]).toBe(divider);
+    });
+
+    test('sorts by team name and leaves tied values in source order', () => {
+      const table = insertTable(buildTableRealDOM([TEAM_B, TEAM_A]));
+      ext.processAllTables();
+      click(table, 'TEAM');
+      expect(teams(table)).toEqual([TEAM_A.team, TEAM_B.team]);
+      click(table, 'TEAM');
+      expect(teams(table)).toEqual([TEAM_B.team, TEAM_A.team]);
+      click(table, 'S/O');
+      expect(teams(table)).toEqual([TEAM_A.team, TEAM_B.team]);
+    });
+
+    test('supports actual button/div headers without data-col attributes', () => {
+      const table = insertTable(buildTableRealDOM([highDumb, highThree]));
+      table.querySelectorAll('[data-col]').forEach((cell) => cell.removeAttribute('data-col'));
+      table.querySelectorAll('thead button').forEach((button) => {
+        button.innerHTML = `<div class="sortable-table-header"><div></div>${button.textContent}<div><svg></svg></div></div>`;
+      });
+      ext.processAllTables();
+      expect(header(table, 'OTW').querySelector('.sortable-table-header')).not.toBeNull();
+      click(table, 'PTS');
+      expect(teams(table)).toEqual(['Overtime', 'Regulation']);
+      expect(header(table, 'PTS').querySelector('.sortable-table-header')).not.toBeNull();
+      expect(header(table, 'DPTS').querySelector('button').title).toBe('DPTS');
+    });
+
+    test('makes plain headers keyboard-operable sort buttons', () => {
+      const table = insertTable(buildTable([highDumb, highThree]));
+      ext.processAllTables();
+      const button = header(table, 'DPTS').querySelector('button');
+      expect(button.type).toBe('button');
+      button.click();
+      expect(header(table, 'DPTS').getAttribute('aria-sort')).toBe('descending');
+    });
+
+    test('restores original nodes before a native tab update and reapplies sorting', () => {
+      const table = insertTable(buildTableRealDOM([highDumb, highThree]));
+      const originalRows = Array.from(table.tBodies[0].rows);
+      const originalHeaders = Array.from(table.tHead.rows[0].cells);
+      ext.processAllTables();
+      click(table, 'DPTS');
+      const tab = document.createElement('button');
+      document.body.append(tab);
+      tab.addEventListener('click', () => {
+        expect(Array.from(table.tBodies[0].rows)).toEqual(originalRows);
+        expect(Array.from(table.tHead.rows[0].cells)).toEqual(originalHeaders);
+        expect(header(table, 'OT').textContent).toBe('OT');
+        table.outerHTML = buildTableRealDOM([highThree, highDumb]);
+      });
+      tab.click();
+      jest.advanceTimersByTime(200);
+      const replacement = document.querySelector('table');
+      expect(teams(replacement)).toEqual(['Overtime', 'Regulation']);
+      expect(header(replacement, 'DPTS').getAttribute('aria-sort')).toBe('descending');
+      expect(replacement.querySelectorAll('thead [data-col="dpts"]')).toHaveLength(1);
+    });
+
+    test('processes replacement bodies and keeps them when restoring for navigation', () => {
+      const table = insertTable(buildTableRealDOM([TEAM_A]));
+      ext.processAllTables();
+      table.tBodies[0].innerHTML = buildTableRealDOM([highDumb, highThree]).match(/<tbody>(.*)<\/tbody>/)[1];
+      ext.processAllTables();
+      expect(teams(table)).toEqual(['Regulation', 'Overtime']);
+      const tab = document.createElement('button');
+      document.body.append(tab);
+      tab.click();
+      expect(teams(table)).toEqual(['Overtime', 'Regulation']);
+      expect(table.querySelectorAll('thead [data-col="dpts"]')).toHaveLength(0);
+      jest.advanceTimersByTime(200);
+      expect(teams(table)).toEqual(['Regulation', 'Overtime']);
+    });
+
+    test('updates ranks using 3-point standings, independently of the sorted column', () => {
+      const table = insertTable(buildTableRealDOM([highDumb, highThree]));
+      table.tHead.rows[0].insertAdjacentHTML('afterbegin', '<th>Rank</th>');
+      Array.from(table.tBodies[0].rows).forEach((row, i) => row.insertAdjacentHTML('afterbegin', `<td>${i + 1}</td>`));
+      ext.processAllTables();
+      expect(teams(table)).toEqual(['Regulation', 'Overtime']);
+      expect(Array.from(table.tBodies[0].rows, (row) => row.cells[0].textContent)).toEqual(['1', '2']);
+      click(table, 'DPTS');
+      expect(teams(table)).toEqual(['Overtime', 'Regulation']);
+      expect(Array.from(table.tBodies[0].rows, (row) => row.cells[0].textContent)).toEqual(['2', '1']);
+      click(table, 'RANK');
+      click(table, 'RANK');
+      expect(teams(table)).toEqual(['Regulation', 'Overtime']);
+    });
+
+    test('automatically processes new DOM without observing its own changes repeatedly', async () => {
+      const table = insertTable(buildTableRealDOM([highDumb, highThree]));
+      await Promise.resolve();
+      jest.advanceTimersByTime(200);
+      expect(teams(table)).toEqual(['Regulation', 'Overtime']);
+      await Promise.resolve();
+      expect(jest.getTimerCount()).toBe(0);
+      click(table, 'PTS');
+      await Promise.resolve();
+      expect(teams(table)).toEqual(['Overtime', 'Regulation']);
+      expect(jest.getTimerCount()).toBe(0);
+    });
+
+    test('normalizes alternate percentage headers and handles tables without ROW', () => {
+      const table = insertTable(buildTableRealDOM([TEAM_A]));
+      header(table, 'P%').querySelector('span').textContent = 'PCT';
+      const rowIndex = Array.from(table.tHead.rows[0].cells).indexOf(header(table, 'ROW'));
+      table.tHead.rows[0].cells[rowIndex].remove();
+      table.tBodies[0].rows[0].cells[rowIndex].remove();
+      ext.processAllTables();
+      expect(header(table, 'P%')).toBeDefined();
+      expect(header(table, 'PCT')).toBeUndefined();
+      expect(table.tBodies[0].rows[0].cells.length).toBe(table.tHead.rows[0].cells.length);
+      click(table, 'P%');
+      expect(header(table, 'P%').getAttribute('aria-sort')).toBe('descending');
+    });
   });
 });
 
