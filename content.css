@@ -1,0 +1,7 @@
+.rt-table tr[data-nhl-cutoff="after"] {
+  border-bottom: 2px solid currentColor;
+}
+
+.rt-table tr[data-nhl-cutoff="before"] {
+  border-top: 2px solid currentColor;
+}
